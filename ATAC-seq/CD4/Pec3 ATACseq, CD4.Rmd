@@ -1,0 +1,545 @@
+---
+title: 'PEC3: ATAC-seq, CD4'
+author: "Javier Rey"
+date: "4/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+``{r installing}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("limma")
+BiocManager::install("topGO")
+BiocManager::install("GO.db")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("rtracklayer")
+BiocManager::install("GenomicRanges")
+BiocManager::install("ChIPQC")
+BiocManager::install("ChIPseeker")
+BiocManager::install("TxDb.Hsapiens.UCSC.hg19.knownGene")
+install_github("ColeWunderlich/soGGi")
+BiocManager::install("Rsubread")
+BiocManager::install("venn")
+
+```{r libraries}
+library(devtools)
+library(rtracklayer)
+library(GenomicRanges)
+library(ChIPQC)
+library(DT)
+library(dplyr)
+library(tidyr)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+install_github("ColeWunderlich/soGGi")
+library(soGGi)
+library(limma)
+library(venn)
+library(tidyr)
+library(Rsubread)
+library(csaw)
+library(edgeR)
+library(UpSetR)
+```
+
+
+
+
+
+
+{r importing test}
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/Datos originales/ATAC-seq/GSE111013_RAW")
+test<-import("GSM3020238_ATAC-seq_CLL1_0d_Bcell.peaks.narrowPeak.gz", "narrowPeak")
+head(test)
+hist(test$score)
+View(as.matrix(summary(as.factor(test@seqnames))))
+
+
+
+
+
+```{r importing CD4, echo=TRUE}
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/Datos originales/ATAC-seq/GSE111013_RAW")
+list.filenames<-list.files(pattern ="CD4.peaks.narrowPeak.gz$")
+list.filenames
+list.data<-list()
+for (i in 1:length(list.filenames)){
+list.data[[i]]<-import(list.filenames[i], "narrowPeak")
+
+}
+names(list.data)<-list.filenames
+CD4.data<-list.data
+list.filenames
+
+a<-CD4.data$`GSM3020241_ATAC-seq_CLL1_0d_CD4.peaks.narrowPeak.gz`
+hist(a$score)
+as.matrix(summary(as.factor(a@seqnames)))
+
+short.names<-sapply(strsplit(list.filenames, "-seq_"), "[", 2)
+short.names<-sapply(strsplit(short.names, ".peaks"), "[", 1)
+short.names
+short.names[19]<-"CLL6_30d_CD4"
+
+```  
+
+```{r Blacklist and chromosome filter}
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/PEC3 ATAC-seq")
+blkList <- import.bed("hg19-blacklist.v2.bed.gz")
+Canonical_chrom<-c("chr1", "chr2", "chr3", "chr4","chr5", "chr6","chr7", "chr8","chr9", "chr10","chr11", "chr12","chr13", "chr14","chr15", "chr16","chr17", "chr18","chr19", "chr20", "chr21", "chr22")
+CD4.filtered<-list()
+CD4.data[[1]]
+length(list.filenames)
+
+for (i in 1:length(list.filenames)){
+MacsCalls <- CD4.data[[i]]
+
+data.frame(Blacklisted = sum(MacsCalls %over% blkList), Not_Blacklisted = sum(!MacsCalls %over% blkList))
+
+MacsCalls.filtered <- MacsCalls[!MacsCalls %over% blkList]
+
+Filtered.peaks<-MacsCalls.filtered[seqnames(MacsCalls.filtered) %in% Canonical_chrom]
+summary(as.factor(seqnames(Filtered.peaks)))
+
+CD4.filtered[[i]]<-Filtered.peaks
+}
+summary(CD4.filtered)
+names(CD4.filtered)<-short.names 
+names(CD4.filtered)
+```
+
+
+
+
+
+
+```{r ChIPseeker annotation}
+
+CD4.anno<-list()
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+
+for (i in 1:length(list.filenames)){
+CD4.anno[[i]] <- annotatePeak(CD4.filtered[[i]], tssRegion=c(-3000, 3000),
+ TxDb=txdb, annoDb="org.Hs.eg.db")
+plotAnnoPie(CD4.anno[[i]], main = short.names[i]) #Opcional, sólo para comprobar la calidad de picos
+}
+
+names(CD4.anno)<-list.filenames
+CD4.anno$`GSM3020245_ATAC-seq_CLL1_0d_CD4.peaks.narrowPeak.gz`
+#With this information we can then subset our peaks/nuc free regions to those only landing in TSS regions (+/- 500)
+CD4.anno.TSS<-list()
+for (i in 1:length(list.filenames)){
+MacsGranges_Anno <- as.GRanges(CD4.anno[[i]])
+CD4.anno.TSS[[i]] <- MacsGranges_Anno[abs(MacsGranges_Anno$distanceToTSS) < 
+    1000]
+}
+summary(CD4.anno[[1]]@anno)
+summary(CD4.anno.TSS[[1]])
+names(CD4.anno.TSS)<-short.names
+
+```
+Observamos que todas las muestras tienen una distribución similar de los picos excepto, quizá, CLL_2_0d, con mayor presencia de picos asociados a promotores.
+
+
+#Differential ATAC-seq 
+
+
+```{r Identifying a set of non-redundant peaks.}
+summary(CD4.anno.TSS) 
+
+consensusToCount <- soGGi:::runConsensusRegions(GRangesList(CD4.anno.TSS), "none")
+consensusToCount
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("_0d_")) %>% venn(main = "Overlap for untreated")
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("3d_")) %>% venn(main = "Overlap for 3 days samples")
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("30d_")) %>% venn(main = "Overlap for 30 days samples")
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains(c("120d_", "150d")) ) %>% venn(main = "Overlap for 120 and 150 days samples")
+
+```
+
+
+```{r upset plots}
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("_0d_")) %>% upset()
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("3d_")) %>% upset()
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains("30d_")) %>% upset()
+as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(contains(c("120d_", "150d", "280")) ) %>% upset()
+```
+Observamos que, en el caso de células CD4, las muestras parecen solapar de manera coherente. En todos los casos  existe un alto número de picos comunes a todas las muestras con respecto a los picos divergentes. En los casos en que existe un gran número de picos comunes a todas las muestras menos a una, es ésta la que tiene menor tamaño y el número de picos comunes faltantes se relaciona con el bajo número de picos totales de la muestra.
+Por ello, decidimos no eliminar, a priori, ninguna muestra del análisis.
+
+```{r }
+short.names
+patientID<-sapply(strsplit(short.names, "CLL"), "[", 2)
+patientID<-sapply(strsplit(patientID, "_"), "[", 1)
+patientID
+TreatmentDay<-sapply(strsplit(short.names, "_"), "[", 2)
+TreatmentDay
+TreatmentDay<-sapply(strsplit(TreatmentDay, "d"), "[", 1)
+TreatmentDay<-as.numeric(TreatmentDay)
+```
+
+```{r}
+Treatmentdaygrouped <- TreatmentDay
+for (i in 1:length(TreatmentDay)){
+        if( TreatmentDay[i] > 0 & TreatmentDay[i] < 4){
+            Treatmentdaygrouped[i] <- 3
+        }
+    else if( TreatmentDay[i] > 4 & TreatmentDay[i] < 9){
+            Treatmentdaygrouped[i] <- 8
+    }
+    else if( TreatmentDay[i] > 30){
+            Treatmentdaygrouped[i] <- 120
+    }
+}
+length(Treatmentdaygrouped)
+```
+
+
+```{r PCA and batch effects}
+PCA_Plot <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC1, y = PC2, shape=patientID,colour = TreatmentDay)) + geom_point(size = 5)
+
+consensusToCount
+PCA_Plot
+
+```
+Vemos que la muestra CLL1_30d vuelve a ser muy diferente del resto, por lo que decidimos exluirla:
+
+
+
+```{r Identifying a set of non-redundant peaks. 2}
+
+
+Treatmentdaygrouped <- TreatmentDay     
+for (i in 1:length(TreatmentDay)){
+        if( TreatmentDay[i] > 0 & TreatmentDay[i] < 4){
+            Treatmentdaygrouped[i] <- 3
+        }
+    else if( TreatmentDay[i] > 4 & TreatmentDay[i] < 9){
+            Treatmentdaygrouped[i] <- 8
+    }
+    else if( TreatmentDay[i] > 30){
+            Treatmentdaygrouped[i] <- 120
+    }
+}
+length(Treatmentdaygrouped)
+
+
+
+summary(CD4.anno.TSS)
+
+
+consensusToCount <- soGGi:::runConsensusRegions(GRangesList(CD4.anno.TSS), "none")
+head(consensusToCount)
+
+day0<-subset.Vector(CD4.anno.TSS, Treatmentdaygrouped == 0)
+day3<-subset.Vector(CD4.anno.TSS, Treatmentdaygrouped == 3)
+day8<-subset.Vector(CD4.anno.TSS, Treatmentdaygrouped == 8)
+day30<-subset.Vector(CD4.anno.TSS, Treatmentdaygrouped == 30)
+day120<-subset.Vector(CD4.anno.TSS, Treatmentdaygrouped == 120)
+
+consensusday0 <- soGGi:::runConsensusRegions(GRangesList(day0), "none")
+consensusday3 <- soGGi:::runConsensusRegions(GRangesList(day3), "none")
+consensusday8 <- soGGi:::runConsensusRegions(GRangesList(day8), "none")
+consensusday30 <- soGGi:::runConsensusRegions(GRangesList(day30), "none")
+consensusday120 <- soGGi:::runConsensusRegions(GRangesList(day120), "none")
+
+
+
+
+
+```
+
+
+```{r PCa and batch effects}
+
+
+PCA_Plot <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC1, y = PC2, shape=patientID,colour = TreatmentDay)) + geom_point(size = 5)
+PCA_Plot
+Treatmentdaygrouped
+
+
+```
+A continuación probamos a ver cómo se distribuyen las muestras sin incluir la PC1 (el tratamiento de batch effect que realizaron los autores)
+```{r PCA PC2 and PC3}
+PCA_Plot <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC2, y = PC3, shape=patientID,colour = TreatmentDay)) + geom_point(size = 5)
+PCA_Plot
+```
+
+
+```{r}
+
+
+PCA_plot_grouped <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% 
+    as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% 
+    mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC1, y = PC2, 
+    colour = as.character(Treatmentdaygrouped))) + geom_point(size = 3)
+
+PCA_plot_grouped 
+
+PCA2vs3_plot_grouped <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% 
+    as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% 
+    mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC2, y = PC3, 
+    colour = as.character(Treatmentdaygrouped))) + geom_point(size = 3)
+PCA2vs3_plot_grouped
+
+PCA2vs3_plot_grouped <- as.data.frame(elementMetadata(consensusToCount)) %>% dplyr::select(-consensusIDs) %>% 
+    as.matrix %>% t %>% prcomp %>% .$x %>% data.frame %>% mutate(Samples = rownames(.)) %>% 
+    mutate(Group = gsub("_\\d", "", Samples)) %>% ggplot(aes(x = PC2, y = PC3, 
+    colour = patientID)) + geom_point(size = 3)
+PCA2vs3_plot_grouped
+```
+
+
+
+
+
+
+
+
+First we will filter our peaks in a manner similar to Diffbind, where we keep only peaks which are present in at least two replicates (debería ser en todos?)
+
+
+```{r Rsubread}
+
+occurrences <- elementMetadata(consensusToCount) %>% as.data.frame %>% dplyr::select(-consensusIDs) %>% rowSums
+
+table(occurrences) %>% rev %>% cumsum
+```
+
+```{r Selección de picos comunes entre pacientes}
+consensusToCount <- consensusToCount[occurrences >= 5, ] ### Podemos elegir otro número, El número de pacientes? etc
+
+head(consensusToCount)
+# Aquí entiendo que el tutorial designa los 14299 picos comunes
+```
+
+#Conservamos sólo picos abiertos en más de la mitad de las muestras
+consensusday0 # 7 muestras
+consensusday120 # 7 muestras
+consensusday3# 10 muestras
+consensusday30 # 5 muestras
+consensusday8  # 3 muestras
+```{r}
+consensus.anno <- annotatePeak(consensusToCount, tssRegion=c(-1000, 1000), TxDb=txdb, annoDb="org.Hs.eg.db")
+
+
+consensus.anno.TSS<-as.GRanges(consensus.anno)
+
+consecount<-as.data.frame(consensus.anno.TSS)
+
+consensus.score.0<-integer(length(consensus.anno.TSS))
+for (i in 1:length(Treatmentdaygrouped)){
+    if (Treatmentdaygrouped[i] == 0){
+        consensus.score.0 <-consensus.score.0 + consecount[, i+5]
+    }
+}
+consensus.score.0<-consensus.score.0/max(consensus.score.0)
+consensus.score.3<-as.vector(integer(length(consensus.anno.TSS)))
+for (i in 1:length(Treatmentdaygrouped)){
+    if (Treatmentdaygrouped[i] == 3){
+        consensus.score.3 <-consensus.score.3 + consecount[, i+5]
+    }
+}
+consensus.score.3<-consensus.score.3/max(consensus.score.3)
+consensus.score.8<-as.vector(integer(length(consensus.anno.TSS)))
+for (i in 1:length(Treatmentdaygrouped)){
+    if (Treatmentdaygrouped[i] == 8){
+        consensus.score.8 <-consensus.score.8 + consecount[, i+5]
+    }
+}
+consensus.score.8<-consensus.score.8/max(consensus.score.8)
+consensus.score.8
+
+consensus.score.30<-as.vector(integer(length(consensus.anno.TSS)))
+for (i in 1:length(Treatmentdaygrouped)){
+    if (Treatmentdaygrouped[i] == 30){
+        consensus.score.30 <-consensus.score.30 + consecount[, i+5]
+    }
+}
+consensus.score.30<-consensus.score.30/max(consensus.score.30)
+
+consensus.score.120<-as.vector(integer(length(consensus.anno.TSS)))
+for (i in 1:length(Treatmentdaygrouped)){
+    if (Treatmentdaygrouped[i] == 120){
+        consensus.score.120 <-consensus.score.120 + consecount[, i+5]
+    }
+}
+consensus.score.120<-consensus.score.120/max(consensus.score.120)
+
+
+
+the.scores<-as.data.frame(cbind(consensus.score.0, consensus.score.3,consensus.score.8, consensus.score.30, consensus.score.120))
+
+names(the.scores)<-c(0, 3, 8, 30, 120)
+all.scores<-the.scores
+
+
+
+
+consecount.scores<-cbind(consecount, all.scores)
+openday0<-subset(consecount.scores, consecount.scores$"0">=0.7)
+
+open0closed3<-subset(openday0, openday0$"3"<=0.3)
+open0closed3
+open0closed8<-subset(openday0, openday0$"8"<=0.3)
+open0closed8
+open0closed30<-subset(openday0, openday0$"30"<=0.3)
+open0closed30
+open0closed120<-subset(openday0, openday0$"120"<=0.3)
+open0closed120
+
+open0closed_ibru<-subset(openday0,   (openday0$"30"<=0.3) & (openday0$"120"<=0.3))
+open0closed_ibru
+
+closedday0<-subset(consecount.scores, consecount.scores$"0"<=0.3)
+
+
+closed0open3<-subset(closedday0, closedday0$"3">=0.7)
+closed0open3
+closed0open8<-subset(closedday0, closedday0$"8">=0.7)
+closed0open8
+closed0open30<-subset(closedday0, closedday0$"30">=0.7)
+closed0open30
+closed0open120<-subset(closedday0, closedday0$"120">=0.7)
+closed0open120
+
+write.table(open0closed3, "CD4_open0closed3.txt", sep="\t")
+write.table(open0closed8, "CD4_open0closed8.txt", sep="\t")
+write.table(open0closed30, "CD4_open0closed30.txt", sep="\t")
+write.table(open0closed120, "CD4_open0closed120.txt", sep="\t")
+
+write.table(closed0open3, "CD4_closed0open3.txt", sep="\t")
+write.table(closed0open8, "CD4_closed0open8.txt", sep="\t")
+write.table(closed0open30, "CD4_closed0open30.txt", sep="\t")
+write.table(closed0open120, "CD4_closed0open120.txt", sep="\t")
+
+consensus.gRanges<-makeGRangesFromDataFrame(consecount.scores, keep.extra.columns = TRUE)
+
+
+
+```
+```{r enrichR GO}
+dbs <- c( "GO_Molecular_Function_2018", "GO_Biological_Process_2018", "Panther_2016")
+
+dfpeakcomp<-list(open0closed3$SYMBOL, open0closed8$SYMBOL, open0closed30$SYMBOL,open0closed120$SYMBOL, closed0open3$SYMBOL, closed0open8$SYMBOL, closed0open30$SYMBOL, closed0open120$SYMBOL)
+enriched <- lapply(dfpeakcomp, enrichr, databases =dbs)
+```
+
+```{r enrichR GO 2}
+
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/PEC3 ATAC-seq/CD4")
+summary(enriched)
+gofilesnames<-c("open0closed3" , "open0closed8" , "open0closed30" ,"open0closed120" , "closed0open3" , "closed0open8" , "closed0open30" , "closed0open120" )
+names(enriched)<-gofilesnames
+
+
+for (i in 1:length(names(enriched))){
+    printEnrich(enriched[[i]], file = paste("CD4_", gofilesnames[i],"enrichr.txt", sep =""),sep = "\t", columns = c(1:9))
+}
+printenriched<-lapply(enriched, printEnrich, file = paste(names(enriched),".txt"),sep = "\t", columns = c(1:9))
+```
+
+
+
+
+{r NO utilizado, para counting}
+
+{r Selección de picos comunes entre pacientes}
+regionsToCount <- data.frame(GeneID = paste("ID", seqnames(consensusToCount), 
+    start(consensusToCount), end(consensusToCount), sep = "_"), Chr = seqnames(consensusToCount),
+    Start = start(consensusToCount), End = end(consensusToCount), Strand = strand(consensusToCount))
+head(regionsToCount)
+
+regionstotry <- data.frame(name = paste("ID", seqnames(consensusToCount), 
+    start(consensusToCount), end(consensusToCount), sep = "_"), geneChr = seqnames(consensusToCount),
+    start = start(consensusToCount), end = end(consensusToCount), strand = strand(consensusToCount))
+
+head(consensusToCount)
+
+intersect(as.data.frame(CLL.anno.TSS$CLL1_0d_CLL), regionstotry)
+head(consensusToCount)
+head(CLL.anno.TSS$CLL1_0d_CLL)
+regionsToCount
+fcResults <- featureCounts(CLL.anno.TSS$CLL1_0d_CLL$score, annot.ext = regionsToCount, isPairedEnd = TRUE, 
+    countMultiMappingReads = FALSE, maxFragLength = 100)
+myCounts <- fcResults$counts
+colnames(myCounts) <- c("HindBrain_1", "HindBrain_2", "Kidney_1", "Kidney_2", 
+    "Liver_1", "Liver_2")
+save(myCounts, file = "ATAC_Data/ATAC_RData/countsFromATAC.RData")
+
+CLL.anno$`GSM3020249_ATAC-seq_CLL1_0d_CLL.peaks.narrowPeak.gz`@anno[1]
+
+consensusToCount@elementMetadata
+CLL.anno.TSS$CLL1_0d_CLL
+regionsToCount
+ # Entiendo que la columna score refleja la densidad de señal de cada pico para cada muestra.Creo que podría hacerse un análisis diferencial de la señal (score) entre diferentes muestras (tratamiento vs no) utilizando la lista de regiones para contar. Aunque todavía no sé como.
+```
+
+
+
+
+
+{r}
+
+
+for (i in 1:length(CLL.anno.TSS)){
+boxplot(quantile(CLL.anno.TSS[[i]]$score), main = (namesno3[i])) 
+}
+
+
+```
+
+
+
+
+# Código no utilizado
+
+
+{r paired reads on peaks}
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/Datos originales/ATAC-seq/GSE111013_RAW")
+bigwig.filenames<-list.files(pattern ="CLL.bigWig$")
+bigwig.filenames
+list.bigwig<-list()
+for (i in 1:length(bigwig.filenames)){
+list.bigwig[[i]]<-import(bigwig.filenames[i], "BigWig")
+}
+names(list.bigwig)<-short.names
+
+CLL.bigwig<-list.bigwig
+
+#Excluimos los datos e la muestra conflictiva
+summary(CLL.bigwig)
+CLL.bigwig[[3]]<-NULL
+summary(CLL.bigwig)
+
+setwd("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/Datos originales/ATAC-seq/GSE111013_RAW")
+bamsToCount <- dir("/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/Datos originales/ATAC-seq/GSE111013_RAW", full.names = TRUE, pattern = "CLL.bigWig$")
+
+# indexBam(bamsToCount)
+regionsToCount <- data.frame(GeneID = paste("ID", seqnames(consensusToCount), 
+    start(consensusToCount), end(consensusToCount), sep = "_"), Chr = seqnames(consensusToCount),
+    Start = start(consensusToCount), End = end(consensusToCount), Strand = strand(consensusToCount))
+head(regionsToCount)
+
+
+
+head(CLL.anno.TSS$CLL1_0d_CLL$score) # puede que los scores sean como los counts y que no necesite los bigwigs, entonces debería, para cada muestra, contarse el número de counts y con eso hacer el deseq2
+
+
+
+fcResults <- featureCounts(bamsToCount, annot.ext = regionsToCount, isPairedEnd = TRUE, 
+    countMultiMappingReads = FALSE, maxFragLength = 100)
+myCounts <- fcResults$counts
+colnames(myCounts) <- namesno3
+save(myCounts, file = "/Users/javi/Documents/Master Bioinformática UOC/Proyecto fin de máster/PEC3 ATAC-seq/countsFromATAC.RData")
+```
+

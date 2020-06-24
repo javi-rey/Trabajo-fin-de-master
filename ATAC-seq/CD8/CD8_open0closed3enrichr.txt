@@ -1,0 +1,35 @@
+GO_Molecular_Function_2018
+MAP kinase activity (GO:0004707)	1/14	0.003495399	1	0	0	285.714286	1616.08794	MAPK9
+epidermal growth factor receptor binding (GO:0005154)	1/25	0.006234939	1	0	0	160.000000	 812.41384	FER
+non-membrane spanning protein tyrosine kinase activity (GO:0004715)	1/43	0.010704833	1	0	0	 93.023256	 422.05209	FER
+growth factor receptor binding (GO:0070851)	1/92	0.022791468	1	0	0	 43.478261	 164.40735	FER
+protein tyrosine kinase activity (GO:0004713)	1/147	0.036217096	1	0	0	 27.210884	  90.29181	FER
+protein kinase activity (GO:0004672)	1/513	0.121848601	1	0	0	  7.797271	  16.41307	FER
+
+
+GO_Biological_Process_2018
+response to reactive oxygen species (GO:0000302)	2/60	8.798847e-05	0.4490051	0	0	133.33333	1245.1073	MAPK9;FER
+cellular response to reactive oxygen species (GO:0034614)	2/65	1.033472e-04	0.2636905	0	0	123.07692	1129.5281	MAPK9;FER
+cellular response to oxidative stress (GO:0034599)	2/115	3.240677e-04	0.5512392	0	0	 69.56522	 558.9258	MAPK9;FER
+Fc-epsilon receptor signaling pathway (GO:0038095)	2/182	8.088444e-04	1.0000000	0	0	 43.95604	 312.9628	MAPK9;FER
+Fc receptor signaling pathway (GO:0038093)	2/183	8.176999e-04	0.8345445	0	0	 43.71585	 310.7766	MAPK9;FER
+SREBP signaling pathway (GO:0032933)	1/6	1.499220e-03	1.0000000	0	0	666.66667	4335.2070	INSIG2
+cellular response to sterol depletion (GO:0071501)	1/7	1.748917e-03	1.0000000	0	0	571.42857	3627.8622	INSIG2
+cellular response to oxygen-containing compound (GO:1901701)	2/274	1.819750e-03	1.0000000	0	0	 29.19708	 184.2060	MAPK9;FER
+tyrosine phosphorylation of STAT protein (GO:0007260)	1/8	1.998563e-03	1.0000000	0	0	500.00000	3107.6633	FER
+regulation of leukocyte degranulation (GO:0043300)	1/9	2.248161e-03	1.0000000	0	0	444.44444	2710.0635	FER
+
+
+Panther_2016
+Oxidative stress response Homo sapiens P00046	1/24	0.005986139	0.6704476	0	0	166.66667	853.0514	MAPK9
+Interferon-gamma signaling pathway Homo sapiens P00035	1/28	0.006981041	0.3909383	0	0	142.85714	709.2225	MAPK9
+FAS signaling pathway Homo sapiens P00020	1/31	0.007726694	0.2884633	0	0	129.03226	627.4934	MAPK9
+Toll receptor signaling pathway Homo sapiens P00054	1/49	0.012191220	0.3413542	0	0	 81.63265	359.7583	MAPK9
+Alzheimer disease-amyloid secretase pathway Homo sapiens P00003	1/56	0.013923080	0.3118770	0	0	 71.42857	305.3005	MAPK9
+B cell activation Homo sapiens P00010	1/57	0.014170290	0.2645121	0	0	 70.17544	298.7093	MAPK9
+Ras Pathway Homo sapiens P04393	1/69	0.017132947	0.2741272	0	0	 57.97101	235.7537	MAPK9
+T cell activation Homo sapiens P00053	1/73	0.018118916	0.2536648	0	0	 54.79452	219.7698	MAPK9
+Parkinson disease Homo sapiens P00049	1/81	0.020088479	0.2499900	0	0	 49.38272	192.9683	MAPK9
+TGF-beta signaling pathway Homo sapiens P00052	1/88	0.021809254	0.2442636	0	0	 45.45455	173.8828	MAPK9
+
+

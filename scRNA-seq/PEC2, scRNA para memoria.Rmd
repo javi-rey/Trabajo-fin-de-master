@@ -1,0 +1,459 @@
+---
+title: 'PEC2: sc-RNAseq'
+author: "Javier Rey"
+date: "3/29/2020"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r paquetes message=FALSE}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+reticulate::py_install(packages = 'umap-learn')
+library(enrichR)
+library(topGO)
+library(limma)
+library(GO.db)
+library(org.Hs.eg.db)
+library(mnormt)
+library(metap)
+
+```
+
+## Lectura de datos
+
+
+Procedemos a la lectura de los datos generados y pretratados por los autores del artículo original utilizando Cell ranger . Utilizaremos el paquete Seurat cuyo primer paso es la generación de un objeto de clase "seurat"
+```{r Read10X, echo=FALSE}
+pbmc.data <- Read10X(data.dir = "GSE111014/")
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "scRNAseq", min.cells = 10, min.features = 200, names.field = 3, names.delim= "-")
+pbmc
+```
+Partimos de un total de 42675 células, entre todos los tipos celulares y todas las muestras. Hemos seleccionado genes que hayan sido detectados en, al menos, 10 células (16423 sobre 19105. Pasamos a la fase de control de calidad:
+Analizamos par cada muestra el número de genes reconocidos, el número de counts y el porcentaje de genes mitocondriales detectados. 
+
+```{r QC test}
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+VlnPlot(pbmc, features = "percent.mt")
+VlnPlot(pbmc, features = "nCount_RNA")
+VlnPlot(pbmc, features = "nFeature_RNA")
+```
+
+
+Observamos que hay tres muestras con bajos números de counts, aunque valores no demasiado bajo de genes detectados. Decidimos no eliminarlos dado el reducido número de muestras disponibles. En cuanto a los valores de ADN mitocondrial, todas las muestras tienen valores inferiores a un 10% en la mayoría de sus células.
+Decidimos comprobar la correlación entre número de Counts y de genes, así como la correlación entre estos números y la cantidad de ADN mitocondrial detectada:
+
+```{r }
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- FeatureScatter(pbmc, feature1 = "percent.mt", feature2 = "nFeature_RNA")
+
+plot1
+plot2
+plot3
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 15)
+pbmc
+ # Control extra de expresion de genes ñinimo en genes y 2 reads, neesario
+```
+Comprobamos la esperada alta correlación entre Counts y Features y también que las células con mayor número de estos tienen bajos niveles de ADN mitocondrial, lo que indica que la mayor parte de las células analizadas están en buen estado.
+Decidimos aplicar un criterio similar al recomendado por los creadores de Seurat, también seguido por los autores el artículo referencia del estudio, seleccionando células con ADN mitocondrial inferior al 15%, más de 200 genes detectados y menos de 2500, lo que excluirá células en mal estado así como su ausencia o la presencia de dos en la reacción.
+Este proceso nos deja con 42246 células (un 99%).
+
+Para evitar batch effects observados en versiones anteriores, decidimos normalizar y encontrar las variables de interés de manera independiente para cada muestra.
+
+```{r Separación de datos por muestra}
+
+pbmc <- SplitObject(pbmc, split.by = "orig.ident")
+```
+Pasamos a la fase de normalización de los counts para cada muestra, utilizando la recomendada por seurat.
+A continuación decidimos seleccionar los genes de interés, que son aquellos con alta variabilidad de expresión entre diferentes células. Seleccionamos 2000 genes de interés. Destacamos los 20 genes con mayor variabilidad entre células
+```{r Normalización y búsqueda de genes de interés}
+
+pbmc <- lapply(X = pbmc, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+```
+
+Tras ello realizamos la integración de los datos de todas las muestras
+```{r Integración de los datos normalizados}
+pbmc.anchors <- FindIntegrationAnchors(object.list = pbmc, dims = 1:20)
+
+combined <- IntegrateData(anchorset = pbmc.anchors, dims = 1:20)
+DefaultAssay(combined) <- "integrated"
+```
+
+Buscamos los genes de interés (2000) comunes a todas las muestras
+```{r Feature selection}
+combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 20 most highly variable genes
+top20 <- head(VariableFeatures(combined), 20)
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(combined)
+plot2 <- LabelPoints(plot = plot1, points = top20, repel = TRUE)
+plot2
+```
+En la gráfica observamos los genes más variables entre las diferentes poblaciones que componen nuestros datos.
+
+A continuación escalamos los valores de los genes seleccionados con el fin de que los genes altamente expresados no tengan un mayor peso en los procesos de reducción de dimensionalidad y clustering posteriores.
+```{r Scalling data}
+all.genes <- rownames(combined)
+combined <- ScaleData(combined, features = all.genes) # Podría hacerse sólo con los 2000 genes de interés, pero los autores de Seurat recomiendan hacerlo en todos los genes para evitar posibles problemas en heatmaps.
+```
+
+Una vez tenemos los datos listos, pasamos a realizar un análisis inicial de componentes principales
+```{r PCA}
+combined<- RunPCA(combined, features = VariableFeatures(object = combined))
+print(combined[["pca"]], dims = 1:5, nfeatures = 10)
+VizDimLoadings(combined, dims = 1:2, reduction = "pca")
+```
+En el gráfico observamos los genes con mayor peso en cada dimensión.
+A continuación observamos la distribución de las células en las primeras dos dimensiones, comprobando que ninguna muestra se aleja globalmente del resto y que todas contienen "los mismos clusters celulares".
+```{r PCA evaluation}
+# Examine and visualize PCA results a few different ways
+
+DimPlot(combined, reduction = "pca")
+DimHeatmap(combined, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(combined, dims = 1:10, cells = 500, balanced = TRUE)
+```
+Observamos también el reparto de la expresión de los principales genes de las primeras 10 componentes, lo que nos servirá más tarde par decidir cuantas utilizamos en los siguientes procesos
+
+A continuación realizaremos dos gráficos para seleccionar cuantas dimensiones seleccionamos: un Elbow plot y un estudio JackStraw
+```{r Choosing dimensionality, elbow plot}
+ElbowPlot(combined)
+```
+El gráfico nos muestra que, al menos, las primeras 10 a 15 dimensiones pueden ser relevantes.
+Como alternativa podríamos hacer un cálculo jackStraw (el código no se ha ejecutado en el informe para evitar un exceso de tiempo de cálculo)
+
+``{r Choosing dimensionality, jackStraw}
+combined <- JackStraw(combined, num.replicate = 100)
+combined <- ScoreJackStraw(combined, dims = 1:20)
+JackStrawPlot(combined, dims = 1:20)
+``
+
+Según el gráfico JackStraw, las primeras 20 dimensiones serían significativas, deciimos reducir el número a 10 ya que éste número parece justificado en ambos gráficos y  nuestro objetivo no necesita identificar una alto número de subpoblaciones que se diferencien en dimensiones ulteriores.
+
+Pasamos al clustering de las células, para lo cual utilizamos el método Louvain, implementado en Seurat. El objetivo es comprobar si nuestro método consigue istinguir entre los diferentes tipos celulares que componen las muestras de sangre periférica.
+```{r Clustering}
+combined <- FindNeighbors(combined, dims = 1:10)
+combined <- FindClusters(combined, resolution = 0.15) # Elegimos una baja resolución para evitar un exceso de particiones.
+DimPlot(combined, reduction = "pca")
+
+```
+La reducción por PCA no parece separarnos correctamente los clusters de células, por ello realizamos un estudio UMAP.
+```{r UMAP }
+combined <- RunUMAP(combined, dims = 1:10, label=TRUE)
+
+UMAP_plot<-DimPlot(combined, reduction = "umap", group.by = NULL)
+UMAP_plot
+UMAP_plot<-DimPlot(combined, reduction = "umap", group.by = "orig.ident")
+UMAP_plot
+```
+
+
+```{r UMAP splitted, fig.height = 3, fig.width = 20}
+UMAP_plot_split<-DimPlot(combined, reduction = "umap", split.by = "orig.ident" )
+UMAP_plot_split
+
+```
+El método UMAP sí nos permite separar gráficamente los clusters. Observamos primero lso clusters generados y después vemos la presencia de lso mismso en cada muestra. Para ello nos resulta útil el gráfico en el que las `muestras se representan de manera separada. Ahí podemos apreciar que la práctica totalidad de los clusters son comunes a todas las muestras 
+
+Sin la corrección de batch effects obteníamos clusters comunes mientras que existían clusters asociados a todas las muestras de un mismo paciente,prácticamente ausentes en el resto . Esto también nos hablaba de la variabilidad entre pacientes.
+
+Decidimos salvar la información relativa al UMAP
+```{r}
+saveRDS(combined, file = "combined_UMAP.rds")
+```
+
+A continuación incorporamos la información relativa al tratamiento con ibrutinib (NO o YES).
+
+```{r Añadiendo información de tratamiento}
+summary(as.factor(combined@meta.data$orig.ident)) 
+levels(Idents(combined))
+Idents(combined)<-combined@meta.data$orig.ident
+levels(Idents(combined))
+summary(as.factor(combined@meta.data$orig.ident))
+combined$ibrutreatment<-Idents(combined)
+ident.treat<-c()
+for (i in 1:length(combined$ibrutreatment)){
+  if (combined$ibrutreatment[i] == "seq_CLL1_d0"|| combined$ibrutreatment[i] =="seq_CLL5_d0"|| combined$ibrutreatment[i] =="seq_CLL6_d0"|| combined$ibrutreatment[i] =="seq_CLL8_d0") {
+    ident.treat <- c(ident.treat, "NO")
+  }
+    else {
+      ident.treat <- c(ident.treat, "YES")
+    }
+}
+summary(as.factor(ident.treat))
+combined$ibrutreatment<-ident.treat
+beforeibru<- WhichCells(combined, ident = c("seq_CLL1_d0", "seq_CLL5_d0", "seq_CLL6_d0", "seq_CLL8_d0" ))
+afteribru<-WhichCells(combined, ident = c("seq_CLL1_d0", "seq_CLL5_d0", "seq_CLL6_d0", "seq_CLL8_d0" ), invert=TRUE)
+```
+
+A contiuación decidimos comprobar lo apropiado del clustering e identificar los tipos celulares a los cuales corresponde cada cluster.
+```{r}
+DefaultAssay(combined) <- "RNA"
+Idents(combined) <- "integrated_snn_res.0.15"
+levels(Idents(combined))
+combined@meta.data
+DimPlot(combined, reduction = "umap", split.by = "ibrutreatment")
+combined.markers <- FindAllMarkers(combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+combined.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+
+``` 
+alternativa:
+cero.markers <- FindConservedMarkers(combined, ident.1 = 0, grouping.var = "ibrutreatment", verbose = FALSE)
+head(cero.markers)
+uno.markers <- FindConservedMarkers(combined, ident.1 = 1, grouping.var = "ibrutreatment", verbose = FALSE)
+head(uno.markers)
+dos.markers <- FindConservedMarkers(combined, ident.1 = 2, grouping.var = "ibrutreatment", verbose = FALSE)
+head(dos.markers)
+tres.markers <- FindConservedMarkers(combined, ident.1 = 3, grouping.var = "ibrutreatment", verbose = FALSE)
+head(tres.markers)
+cuatro.markers <- FindConservedMarkers(combined, ident.1 = 4, grouping.var = "ibrutreatment", verbose = FALSE)
+head(cuatro.markers)
+
+Utilizamos los marcadores mostrados en la tabla anterior, así como otros clásicos para definir las poblaciones.
+```{r dotplot para marcadores }
+
+Idents(combined) <- "integrated_snn_res.0.15"
+markers.to.plot <- c("TCRA","CD3D", "CD4","IL7R", "CD8A", "CD19", "CD79A", "CD5", "CD14", "LYZ", "ZAP70", "CD38", "NCAM1", "CXCR1", "KLRF1", "SH2D1B", "MYBL1", "NKG7", "CXCR6", "IGHM", "BTK")
+DotPlot(combined, features = rev(markers.to.plot), cols = c("blue", "red"), dot.scale = 8, split.by = "ibrutreatment") + RotatedAxis()
+
+```
+
+Tras ello, nombramos cada población
+
+```{r adjudicar clusters a tipos celulares}
+FeaturePlot(combined, features = c("CD19", "CD5", "CD4","IL7R", "CD8A", "CD79A", "CD3D", "CD14", "LYZ", "NKG7", "NCAM1", ""))
+Idents(combined) <- "integrated_snn_res.0.15"
+combined <- RenameIdents(combined, `0` = "CLL", `1` = "CD8 T cells", `2` = "CLL Apoptóticas", `3` = "Monocitos", `4` = "CD4 T cells", `5` = "Sin asignación", `6` = "Plaquetas")
+DimPlot(combined, reduction = "umap", split.by = "ibrutreatment", label=TRUE)
+
+```
+
+
+*ANÁLISIS DE EXPRESIÓN DIFERENCIAL POR IBRUTINIB*
+
+
+Comenzamos seleccionando las células tumorales
+```{r CLL}
+CLL<-subset(combined,idents ="CLL"  )
+summary(CLL@meta.data)
+DefaultAssay(CLL) <- "RNA"
+Idents(CLL)<-"ibrutreatment"
+```
+
+Encontramos los genes con expresión diferencial.
+
+```{r CLL Findmarkers}
+
+Idents(CLL) <- "ibrutreatment"
+treatmentmarkers <- FindMarkers(CLL, ident.1 = "YES", ident.2= "NO", min.pct = 0.1)
+```
+
+Separamos la información en genes inhibidos y sobreexpresados, la guardamos y lanzamos los análisis de Gene Ontology
+```{r CLL Differential expression}
+treatmentup<-subset(treatmentmarkers, treatmentmarkers$avg_logFC>0)
+treatmentdown<-subset(treatmentmarkers, treatmentmarkers$avg_logFC<0)
+write.table(treatmentup, "CLL_treatmentup markers.txt", sep="\t")
+write.table(treatmentdown, "CLL_treatmentdown markers.txt", sep="\t")
+treatmentup[1:20,]
+ geneIDsup <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentup),column= "ENTREZID", keytype="SYMBOL")
+ goup <- goana(rownames(treatmentup), geneid<-geneIDsup, FDR=0.5, species = "Hs")
+ treatmentup[1:20,]
+ topGO(goup)
+  geneIDsdown <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentdown),column= "ENTREZID", keytype="SYMBOL")
+  godown <- goana(rownames(treatmentdown), geneid<-geneIDsdown, FDR=0.5, species = "Hs")
+treatmentdown[1:20,]
+ topGO(godown)
+```
+
+En combinación con Enrichr, obtenemos una serie de genes asociados al citoesqueleto y a la adhesión celular, comprobamos la distribución de su expresión antes y durante el tratamiento.
+
+```{r CLL dotplot cytoskeleton genes, fig.height = 8, fig.width = 8}
+Idents(CLL) <- "ibrutreatment"
+VlnPlot(object = CLL, features = c("BTK", "ARPC2","ARPC3", "ARPC5","ARPC1B", "CFL1", "RAC2", "RHOC", "ACTB", "ACTG1", "ITGB1", "ITGB7", "JUN", "CXCR3"), pt.size = 0)
+RidgePlot(object = CLL, features = c("BTK", "ARPC2","ARPC3", "ARPC5","ARPC1B", "CFL1", "RAC2", "RHOC", "ACTB", "ACTG1", "ITGB1", "ITGB7", "JUN", "CXCR3"))
+```
+
+```{r HeatMap, fig.height = 9, fig.width = 6}
+DefaultAssay(CLL) <- "integrated"
+namesdown<-as.vector(labels(treatmentdown))
+namesup<-as.vector(labels(treatmentup))
+DoHeatmap(CLL, features = c(namesdown[[1]], namesup[[1]]))
+```
+
+Realizamos el mismo proceso para el resto de tipos celulares de interés:
+
+```{r CD8}
+CD8<-subset(combined, idents= "CD8 T cells" )
+DefaultAssay(CD8) <- "RNA"
+```
+
+
+```{r CD8 Findmarkers}
+
+Idents(CD8) <- "ibrutreatment"
+treatmentmarkers <- FindMarkers(CD8, ident.1 = "YES", ident.2= "NO", min.pct = 0.1)
+```
+```{r CD8 Differential expression}
+treatmentup<-subset(treatmentmarkers, treatmentmarkers$avg_logFC>0)
+treatmentdown<-subset(treatmentmarkers, treatmentmarkers$avg_logFC<0)
+write.table(treatmentup, "CD8_treatmentup markers.txt", sep="\t")
+write.table(treatmentdown, "CD8_treatmentdown markers.txt", sep="\t")
+
+ geneIDsup <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentup),column= "ENTREZID", keytype="SYMBOL")
+ goup <- goana(rownames(treatmentup), geneid<-geneIDsup, FDR=0.5, species = "Hs")
+ treatmentup[1:20,]
+ topGO(goup)
+  geneIDsdown <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentdown),column= "ENTREZID", keytype="SYMBOL")
+  godown <- goana(rownames(treatmentdown), geneid<-geneIDsdown, FDR=0.5, species = "Hs")
+treatmentdown[1:20,]
+topGO(godown)
+
+```
+```{r CD8 dotplot highlighted genes, fig.height = 5, fig.width = 5}
+Idents(CD8) <- "ibrutreatment"
+
+RidgePlot(object = CD8 , features = c( "ITGB1", "JUN", "FYN", "FGR", "GZMB", "PFN1"))
+```
+
+
+```{r HeatMap, fig.height = 9, fig.width = 6}
+DefaultAssay(CD8) <- "integrated"
+namesdown<-as.vector(labels(treatmentdown))
+namesup<-as.vector(labels(treatmentup))
+DoHeatmap(CD8, features = c(namesdown[[1]], namesup[[1]]))
+```
+
+```{r CD14 }
+CD14<-subset(combined, idents= "Monocitos" )
+DefaultAssay(CD14) <- "RNA"
+```
+
+
+
+```{r}
+Idents(CD14) <- "ibrutreatment"
+treatmentmarkers <- FindMarkers(CD14, ident.1 = "YES", ident.2= "NO", min.pct = 0.1)
+```
+
+```{r CD14 Differential expression}
+treatmentup<-subset(treatmentmarkers, treatmentmarkers$avg_logFC>0)
+treatmentdown<-subset(treatmentmarkers, treatmentmarkers$avg_logFC<0)
+write.table(treatmentup, "CD14_treatmentup markers.txt", sep="\t")
+write.table(treatmentdown, "CD14_treatmentdown markers.txt", sep="\t")
+
+ geneIDsup <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentup),column= "ENTREZID", keytype="SYMBOL")
+ goup <- goana(rownames(treatmentup), geneid<-geneIDsup, FDR=0.5, species = "Hs")
+ treatmentup[1:20,]
+ topGO(goup)
+  geneIDsdown <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentdown),column= "ENTREZID", keytype="SYMBOL")
+  godown <- goana(rownames(treatmentdown), geneid<-geneIDsdown, FDR=0.5, species = "Hs")
+treatmentdown[1:20,]
+  topGO(godown)
+ 
+```
+
+```{r HeatMap, fig.height = 9, fig.width = 6}
+DefaultAssay(CD14) <- "integrated"
+namesdown<-as.vector(labels(treatmentdown))
+namesup<-as.vector(labels(treatmentup))
+DoHeatmap(CD14, features = c(namesdown[[1]], namesup[[1]]))
+```
+
+```{r CD4 }
+CD4<-subset(combined, idents= "CD4 T cells" )
+DefaultAssay(CD4) <- "RNA"
+
+```
+
+
+
+```{r}
+Idents(CD4) <- "ibrutreatment"
+treatmentmarkers <- FindMarkers(CD4, ident.1 = "YES", ident.2= "NO", min.pct = 0.1)
+
+```
+
+
+```{r CD4 Differential expression}
+treatmentup<-subset(treatmentmarkers, treatmentmarkers$avg_logFC>0)
+treatmentdown<-subset(treatmentmarkers, treatmentmarkers$avg_logFC<0)
+write.table(treatmentup, "CD4_treatmentup markers.txt", sep="\t")
+write.table(treatmentdown, "CD4_treatmentdown markers.txt", sep="\t")
+ geneIDsup <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentup),column= "ENTREZID", keytype="SYMBOL")
+ goup <- goana(rownames(treatmentup), geneid<-geneIDsup, FDR=0.5, species = "Hs")
+treatmentup[1:20,]
+ topGO(goup)
+  geneIDsdown <- AnnotationDbi::mapIds(org.Hs.eg.db, keys=rownames(treatmentdown),column= "ENTREZID", keytype="SYMBOL")
+  godown <- goana(rownames(treatmentdown), geneid<-geneIDsdown, FDR=0.5, species = "Hs")
+ treatmentdown[1:20,]
+  topGO(godown)
+```
+
+```{r HeatMap, fig.height = 9, fig.width = 6}
+DefaultAssay(CD4) <- "integrated"
+namesdown<-as.vector(labels(treatmentdown))
+namesup<-as.vector(labels(treatmentup))
+DoHeatmap(CD4, features = c(namesdown[[1]], namesup[[1]]))
+```
+
+
+*Estudio del efecto del ibrutinib en la heterogeneidad poblacional de células CLL*
+
+``{r CLL Clustering}
+
+DefaultAssay(CLL) <- "integrated"
+CLL <- FindNeighbors(CLL, dims = 1:15)
+CLL <- FindClusters(CLL, resolution = 1) # Elegimos una alta resolución para detectar posibles subpopulaciones
+Idents(CLL)<- "integrated_snn_res.1"
+CLL
+CLL <- RunUMAP(CLL, dims = 1:15, label=TRUE)
+UMAP_plot<-DimPlot(CLL, reduction = "umap", split.by = "ibrutreatment")
+UMAP_plot
+
+ocho.markers <- FindConservedMarkers(CLL, ident.1 = 8, grouping.var = "ibrutreatment", verbose = FALSE)
+head(cuatro.markers)
+
+
+
+Idents(CLL)<- "ibrutreatment"
+CLLYES<-subset(CLL, idents= "YES" , downsample = 5000) # Objetivo, un umap plot con 5k en ambos sitios
+CLLNO<-subset(CLL, idents= "NO",  downsample = 5000)
+CLL10K<-merge(CLLNO, CLLYES)
+
+all.genes10K <- rownames(CLL10K)
+CLL10K <- ScaleData(CLL10K, features = all.genes10K) 
+CLL10K<- RunPCA(CLL10K, features = VariableFeatures(object = CLL10K))
+DefaultAssay(CLL10K) <- "integrated"
+CLL10K <- FindNeighbors(CLL10K, dims = 1:15)
+CLL10K <- FindClusters(CLL10K, resolution = 1) # Elegimos una alta resolución para detectar posibles subpopulaciones
+Idents(CLL10K)<- "integrated_snn_res.1"
+CLL10K
+CLL10K <- RunUMAP(CLL10K, dims = 1:15, label=TRUE)
+UMAP_plot<-DimPlot(CLL10K, reduction = "umap", split.by = "ibrutreatment")
+UMAP_plot
+cuatro.markers <- FindConservedMarkers(combined, ident.1 = 4, grouping.var = "ibrutreatment", verbose = FALSE)
+head(cuatro.markers)
+
+```
+
+CLL <- RunTSNE(object = CLL)
+DimPlot(CLL,reduction = "tsne", split.by = "ibrutreatment")
+DimPlot(CLL, dims= c(2,3), reduction = "pca", group.by = "ibrutreatment")
+DimHeatmap(CLL, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(CLL, dims = 1:15, cells = 2000, balanced = TRUE)
+
+```
+
